@@ -29,7 +29,7 @@ def _activation_summary(x):
 
 
 def _variable_on_gpu(name, shape, initializer):
-    """Helper to create a Variable stored on CPU memory.
+    """Helper to create a Variable stored on GPU memory.
 
   Args:
     name: name of the variable
@@ -70,6 +70,26 @@ def _variable_with_weight_decay(name, shape, stddev, wd):
     return var
 
 
+def _batch_normalization(x):
+    """Batch normalization."""
+    with tf.variable_scope("batch_normal"):
+        params_shape = [x.get_shape()[-1]]
+
+        beta = tf.get_variable(
+            'beta', params_shape, tf.float32,
+            initializer=tf.constant_initializer(0.0, tf.float32))
+        gamma = tf.get_variable(
+            'gamma', params_shape, tf.float32,
+            initializer=tf.constant_initializer(1.0, tf.float32))
+
+        mean, variance = tf.nn.moments(x, [0, 1, 2], name='moments')
+        # elipson used to be 1e-5. Maybe 0.001 solves NaN problem in deeper net.
+        y = tf.nn.batch_normalization(
+            x, mean, variance, beta, gamma, 0.001)
+        y.set_shape(x.get_shape())
+
+    return y
+
 _turn = 0
 
 
@@ -91,7 +111,7 @@ class DeepSuna(AI_Player):
     STORE_SCORES_LEN = 200.
     START_TIME = 0
 
-    def __init__(self, checkpoint_path="deep_suna_networks", playback_mode=False, verbose_logging=False):
+    def __init__(self, checkpoint_path="deep_suna_networks", playback_mode=True, verbose_logging=False):
         """
         Example of deep q network for pong
 
@@ -109,14 +129,16 @@ class DeepSuna(AI_Player):
         self.verbose_logging = verbose_logging
         self._checkpoint_path = checkpoint_path
 
-        tf.reset_default_graph()
         # set the first action to do nothing
         self._last_action = np.zeros(self.ACTIONS_COUNT)
         self._last_action[1] = 1
 
         self._last_state = None
+
         # Create an optimizer that performs gradient descent.
         self.opt = tf.train.AdamOptimizer(self.LEARN_RATE)
+        # Calculate the gradients for each model tower.
+        # self.tower_grads = []
 
         self._input_states = tf.placeholder("float",
                                             [None, self.RESIZED_SCREEN_X,
@@ -128,8 +150,8 @@ class DeepSuna(AI_Player):
                                                    [None, self.RESIZED_SCREEN_X,
                                                     self.RESIZED_SCREEN_Y,
                                                     self.STATE_FRAMES])
-        # Calculate the gradients for each model tower.
-        self.tower_grads = []
+        # self.readout_action.append(None)
+        # self.cost.append(None)
 
         # with tf.device('/gpu:0'):
         with tf.variable_scope('conv1'):
@@ -140,7 +162,8 @@ class DeepSuna(AI_Player):
             self.biases1 = _variable_on_gpu('biases', [32], tf.constant_initializer(0.01))
             conv = tf.nn.conv2d(self._input_states, self.kernel1, [1, 2, 2, 1], padding='SAME')
             pre_activation = tf.nn.bias_add(conv, self.biases1)
-            conv1 = tf.nn.relu(pre_activation)
+            batch_norm = _batch_normalization(pre_activation)
+            conv1 = tf.nn.relu(batch_norm)
 
         with tf.variable_scope('conv2'):
             self.kernel2 = _variable_with_weight_decay('weights',
@@ -151,7 +174,8 @@ class DeepSuna(AI_Player):
             # conv2
             conv = tf.nn.conv2d(conv1, self.kernel2, [1, 2, 2, 1], padding='SAME')
             pre_activation = tf.nn.bias_add(conv, self.biases2)
-            conv2 = tf.nn.relu(pre_activation)
+            batch_norm = _batch_normalization(pre_activation)
+            conv2 = tf.nn.relu(batch_norm)
 
         with tf.variable_scope('conv3'):
             self.kernel3 = _variable_with_weight_decay('weights',
@@ -162,7 +186,8 @@ class DeepSuna(AI_Player):
             # conv3
             conv = tf.nn.conv2d(conv2, self.kernel3, [1, 1, 1, 1], padding='SAME')
             pre_activation = tf.nn.bias_add(conv, self.biases3)
-            conv3 = tf.nn.relu(pre_activation)
+            batch_norm = _batch_normalization(pre_activation)
+            conv3 = tf.nn.relu(batch_norm)
 
         with tf.variable_scope('local3'):
             self.weights4 = _variable_with_weight_decay('weights', shape=[6400, 256],
@@ -190,24 +215,14 @@ class DeepSuna(AI_Player):
 
         self.duration = 0
         self.count = 1
-        self.restore_filename = 100000
+        self.restore_filename = 5500000
 
         self.saver = tf.train.Saver()
         # self.saver.restore(self._session, "networks_middle_presentation/model7300000")
 
-        self.file_folder = "networks_v11_kajima_double_171004"
+        self.file_folder = "deep_suna_networks"
         self.saver.restore(self._session, self.file_folder + "/model"
                            + str(self.restore_filename))
-
-        '''
-        checkpoint = tf.train.get_checkpoint_state(self._checkpoint_path)
-
-        if checkpoint and checkpoint.model_checkpoint_path:
-            self._saver.restore(self._session, checkpoint.model_checkpoint_path)
-            print("Loaded checkpoints %s" % checkpoint.model_checkpoint_path)
-        elif playback_mode:
-            raise Exception("Could not load checkpoints for playback")
-        '''
 
     def get_keys_pressed(self, screen_array, reward, terminal, turn):
         # scale down screen image
@@ -246,9 +261,6 @@ class DeepSuna(AI_Player):
 
         self._last_action = self._choose_next_action()
 
-        # cv2.imshow("show", screen_resized_grayscaled)
-        # cv2.waitKey(0)
-
         return self._key_presses_from_action(self._last_action)
 
     def _choose_next_action(self):
@@ -259,7 +271,6 @@ class DeepSuna(AI_Player):
             = self._session.run(self.output_layer, feed_dict={self._input_states: [self._last_state]})[0]
 
         action_index = np.argmax(self.readout_t)
-        # print "maxQ=", np.max(self.readout_t)
 
         new_action[action_index] = 1
         return new_action

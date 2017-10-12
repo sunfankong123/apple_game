@@ -42,8 +42,8 @@ import os
 import random
 from collections import deque
 import re
-import sys
 import signal
+import sys
 
 import time
 
@@ -72,8 +72,8 @@ def _activation_summary(x):
     tf.summary.scalar(tensor_name + '/sparsity', tf.nn.zero_fraction(x))
 
 
-def _variable_on_gpu(name, shape, initializer):
-    """Helper to create a Variable stored on GPU memory.
+def _variable_on_cpu(name, shape, initializer):
+    """Helper to create a Variable stored on CPU memory.
 
   Args:
     name: name of the variable
@@ -83,7 +83,7 @@ def _variable_on_gpu(name, shape, initializer):
   Returns:
     Variable Tensor
   """
-    with tf.device('/gpu:0'):
+    with tf.device('/cpu:0'):
         var = tf.get_variable(name, shape, initializer=initializer)
     return var
 
@@ -104,7 +104,7 @@ def _variable_with_weight_decay(name, shape, stddev, wd):
   Returns:
     Variable Tensor
   """
-    var = _variable_on_gpu(
+    var = _variable_on_cpu(
         name,
         shape,
         tf.truncated_normal_initializer(stddev=stddev))
@@ -112,6 +112,49 @@ def _variable_with_weight_decay(name, shape, stddev, wd):
         weight_decay = tf.multiply(tf.nn.l2_loss(var), wd, name='weight_loss')
         tf.add_to_collection('losses', weight_decay)
     return var
+
+
+def _batch_normalization(x):
+    """Batch normalization."""
+    with tf.variable_scope("batch_normal"):
+        params_shape = [x.get_shape()[-1]]
+
+        beta = tf.get_variable(
+            'beta', params_shape, tf.float32,
+            initializer=tf.constant_initializer(0.0, tf.float32))
+        gamma = tf.get_variable(
+            'gamma', params_shape, tf.float32,
+            initializer=tf.constant_initializer(1.0, tf.float32))
+
+        mean, variance = tf.nn.moments(x, [0, 1, 2], name='moments')
+        # elipson used to be 1e-5. Maybe 0.001 solves NaN problem in deeper net.
+        y = tf.nn.batch_normalization(
+            x, mean, variance, beta, gamma, 0.001)
+        y.set_shape(x.get_shape())
+
+    return y, beta, gamma
+
+
+def _target_batch_normalization(x):
+    """Batch normalization."""
+    with tf.variable_scope("batch_normal"):
+        params_shape = [x.get_shape()[-1]]
+
+        beta = tf.get_variable(
+            'beta', params_shape, tf.float32,
+            initializer=tf.constant_initializer(0.0, tf.float32))
+        gamma = tf.get_variable(
+            'gamma', params_shape, tf.float32,
+            initializer=tf.constant_initializer(1.0, tf.float32))
+
+        mean, variance = tf.nn.moments(x, [0, 1, 2], name='moments')
+        # elipson used to be 1e-5. Maybe 0.001 solves NaN problem in deeper net.
+        y = tf.nn.batch_normalization(
+            x, mean, variance, beta, gamma, 0.001)
+        y.set_shape(x.get_shape())
+
+    return y, beta, gamma
+
 
 start_time = time.time()
 play_steps = 0
@@ -186,7 +229,6 @@ class DeepSuna(AI_Player):
 
         # Create an optimizer that performs gradient descent.
         self.opt = tf.train.AdamOptimizer(self.LEARN_RATE)
-
         # Calculate the gradients for each model tower.
         # self.tower_grads = []
 
@@ -209,50 +251,70 @@ class DeepSuna(AI_Player):
                                                        shape=[8, 8, self.STATE_FRAMES, 32],
                                                        stddev=0.01,
                                                        wd=None)
-            self.biases1 = _variable_on_gpu('biases', [32], tf.constant_initializer(0.01))
+            self.biases1 = _variable_on_cpu('biases', [32], tf.constant_initializer(0.01))
             conv = tf.nn.conv2d(self._input_states, self.kernel1, [1, 2, 2, 1], padding='SAME')
             pre_activation = tf.nn.bias_add(conv, self.biases1)
-            conv1 = tf.nn.relu(pre_activation)
+            batch_norm, self.beta1, self.gamma1 = _batch_normalization(pre_activation)
+            conv1 = tf.nn.relu(batch_norm)
+            # _activation_summary(conv1)
+
+            # pool1
+        pool1 = tf.nn.max_pool(conv1, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1],
+                               padding='SAME', name='pool1')
+        # norm1
+        # norm1 = tf.nn.lrn(pool1, 4, bias=1.0, alpha=0.001 / 9.0, beta=0.75,
+        #                   name='norm1')
 
         with tf.variable_scope('conv2'):
             self.kernel2 = _variable_with_weight_decay('weights',
                                                        shape=[4, 4, 32, 64],
                                                        stddev=0.01,
                                                        wd=0.0)
-            self.biases2 = _variable_on_gpu('biases', [64], tf.constant_initializer(0.01))
+            self.biases2 = _variable_on_cpu('biases', [64], tf.constant_initializer(0.01))
             # conv2
-            conv = tf.nn.conv2d(conv1, self.kernel2, [1, 2, 2, 1], padding='SAME')
+            conv = tf.nn.conv2d(pool1, self.kernel2, [1, 2, 2, 1], padding='SAME')
             pre_activation = tf.nn.bias_add(conv, self.biases2)
-            conv2 = tf.nn.relu(pre_activation)
+            batch_norm, self.beta2, self.gamma2 = _batch_normalization(pre_activation)
+            conv2 = tf.nn.relu(batch_norm)
             # _activation_summary(conv2)
+
+        pool2 = tf.nn.max_pool(conv2, ksize=[1, 2, 2, 1],
+                               strides=[1, 2, 2, 1], padding='SAME', name='pool2')
 
         with tf.variable_scope('conv3'):
             self.kernel3 = _variable_with_weight_decay('weights',
                                                        shape=[3, 3, 64, 64],
                                                        stddev=0.01,
                                                        wd=0.0)
-            self.biases3 = _variable_on_gpu('biases', [64], tf.constant_initializer(0.01))
+            self.biases3 = _variable_on_cpu('biases', [64], tf.constant_initializer(0.01))
             # conv3
-            conv = tf.nn.conv2d(conv2, self.kernel3, [1, 1, 1, 1], padding='SAME')
+            conv = tf.nn.conv2d(pool2, self.kernel3, [1, 1, 1, 1], padding='SAME')
             pre_activation = tf.nn.bias_add(conv, self.biases3)
-            conv3 = tf.nn.relu(pre_activation)
+            batch_norm, self.beta3, self.gamma3 = _batch_normalization(pre_activation)
+            conv3 = tf.nn.relu(batch_norm)
+            # _activation_summary(conv3)
+            # pool3
+        pool3 = tf.nn.max_pool(conv3, ksize=[1, 2, 2, 1],
+                               strides=[1, 2, 2, 1], padding='SAME', name='pool2')
 
         with tf.variable_scope('local3'):
-            self.weights4 = _variable_with_weight_decay('weights', shape=[6400, 256],
+            self.weights4 = _variable_with_weight_decay('weights', shape=[256, 256],
                                                         stddev=0.01, wd=0.0)
-            self.biases4 = _variable_on_gpu('biases', [256], tf.constant_initializer(0.01))
+            self.biases4 = _variable_on_cpu('biases', [256], tf.constant_initializer(0.01))
             # local3
             # Move everything into depth so we can perform a single matrix multiply.
-            reshape = tf.reshape(conv3, [-1, 6400])
+            reshape = tf.reshape(pool3, [-1, 256])
             # dim = reshape.get_shape()[1].value
-            local3 = tf.nn.relu(tf.matmul(reshape, self.weights4) + self.biases4)
+            fully_connected = tf.matmul(reshape, self.weights4) + self.biases4
+            # batch_norm = _batch_normalization(fully_connected, 256, 2)
+            local3 = tf.nn.relu(fully_connected)
             # _activation_summary(local3)
             # fiction_dropout = tf.nn.dropout(local3, keep_prob=0.5)
 
         with tf.variable_scope('softmax_linear'):
             self.weights6 = _variable_with_weight_decay('weights', [256, self.ACTIONS_COUNT],
                                                         stddev=0.01, wd=0.0)
-            self.biases6 = _variable_on_gpu('biases', [self.ACTIONS_COUNT],
+            self.biases6 = _variable_on_cpu('biases', [self.ACTIONS_COUNT],
                                             tf.constant_initializer(0.01))
             self.output_layer = tf.add(tf.matmul(local3, self.weights6), self.biases6)
             # _activation_summary(self.output_layer[d])
@@ -274,43 +336,57 @@ class DeepSuna(AI_Player):
                                                               shape=[8, 8, self.STATE_FRAMES, 32],
                                                               stddev=0.01,
                                                               wd=0.0)
-            self.target_biases1 = _variable_on_gpu('target_biases', [32], tf.constant_initializer(0.01))
+            self.target_biases1 = _variable_on_cpu('target_biases', [32], tf.constant_initializer(0.01))
             target_conv = tf.nn.conv2d(self._target_input_states, self.target_kernel1, [1, 2, 2, 1],
                                        padding='SAME')
             target_pre_activation = target_conv + self.target_biases1
-            target_conv1 = tf.nn.relu(target_pre_activation)
+            target_batch_norm, self.target_beta1, self.target_gamma1 = _batch_normalization(target_pre_activation)
+            target_conv1 = tf.nn.relu(target_batch_norm)
             # _activation_summary(target_conv1)
+
+        target_pool1 = tf.nn.max_pool(target_conv1, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1],
+                                      padding='SAME', name='target_pool1')
 
         with tf.variable_scope('target_conv2'):
             self.target_kernel2 = _variable_with_weight_decay('target_weights',
                                                               shape=[4, 4, 32, 64],
                                                               stddev=0.01,
                                                               wd=0.0)
-            self.target_biases2 = _variable_on_gpu('target_biases', [64], tf.constant_initializer(0.01))
+            self.target_biases2 = _variable_on_cpu('target_biases', [64], tf.constant_initializer(0.01))
             # conv2
-            target_conv = tf.nn.conv2d(target_conv1, self.target_kernel2, [1, 2, 2, 1], padding='SAME')
+            target_conv = tf.nn.conv2d(target_pool1, self.target_kernel2, [1, 2, 2, 1], padding='SAME')
             target_pre_activation = target_conv + self.target_biases2
-            target_conv2 = tf.nn.relu(target_pre_activation)
+            target_batch_norm, self.target_beta2, self.target_gamma2 = _batch_normalization(target_pre_activation)
+            target_conv2 = tf.nn.relu(target_batch_norm)
+            # _activation_summary(target_conv2)
+
+        target_pool2 = tf.nn.max_pool(target_conv2, ksize=[1, 2, 2, 1],
+                                      strides=[1, 2, 2, 1], padding='SAME', name='target_pool2')
 
         with tf.variable_scope('target_conv3'):
             self.target_kernel3 = _variable_with_weight_decay('target_weights',
                                                               shape=[3, 3, 64, 64],
                                                               stddev=0.01,
                                                               wd=0.0)
-            self.target_biases3 = _variable_on_gpu('target_biases', [64], tf.constant_initializer(0.01))
+            self.target_biases3 = _variable_on_cpu('target_biases', [64], tf.constant_initializer(0.01))
             # conv3
-            target_conv = tf.nn.conv2d(target_conv2, self.target_kernel3, [1, 1, 1, 1], padding='SAME')
+            target_conv = tf.nn.conv2d(target_pool2, self.target_kernel3, [1, 1, 1, 1], padding='SAME')
             target_pre_activation = target_conv + self.target_biases3
-            target_conv3 = tf.nn.relu(target_pre_activation)
+            target_batch_norm, self.target_beta3, self.target_gamma3 = _batch_normalization(target_pre_activation)
+            target_conv3 = tf.nn.relu(target_batch_norm)
+            # _activation_summary(target_conv3)
+
+        target_pool3 = tf.nn.max_pool(target_conv3, ksize=[1, 2, 2, 1],
+                                      strides=[1, 2, 2, 1], padding='SAME', name='target_pool2')
 
         with tf.variable_scope('target_local3'):
             self.target_weights4 = _variable_with_weight_decay('target_weights',
-                                                               shape=[6400, 256],
+                                                               shape=[256, 256],
                                                                stddev=0.01, wd=0.0)
-            self.target_biases4 = _variable_on_gpu('target_biases', [256], tf.constant_initializer(0.01))
+            self.target_biases4 = _variable_on_cpu('target_biases', [256], tf.constant_initializer(0.01))
             # local3
             # Move everything into depth so we can perform a single matrix multiply.
-            reshape = tf.reshape(target_conv3, [-1, 6400])
+            reshape = tf.reshape(target_pool3, [-1, 256])
             # dim = reshape.get_shape()[1].value
 
             target_local3 = tf.nn.relu(tf.matmul(reshape, self.target_weights4) + self.target_biases4)
@@ -321,7 +397,7 @@ class DeepSuna(AI_Player):
             self.target_weights6 = _variable_with_weight_decay('target_weights',
                                                                [256, self.ACTIONS_COUNT],
                                                                stddev=0.01, wd=0.0)
-            self.target_biases6 = _variable_on_gpu('target_biases', [self.ACTIONS_COUNT],
+            self.target_biases6 = _variable_on_cpu('target_biases', [self.ACTIONS_COUNT],
                                                    tf.constant_initializer(0.01))
 
             self.target_output_layer = tf.add(tf.matmul(target_local3, self.target_weights6),
@@ -361,7 +437,7 @@ class DeepSuna(AI_Player):
         # self.fileloss = open("lossdata.txt", "w")
 
         self.saver = tf.train.Saver()
-        # self.saver.restore(self._session, "deep_suna_networks/model40000")
+        # self.saver.restore(self._session, "deep_suna_networks/relearning_model6100000")
         '''
         self._saver.restore(self._session, "deep_q_pong_networks/network-1040000")
 
@@ -383,7 +459,7 @@ class DeepSuna(AI_Player):
         # show resized image
 
         # cv2.imshow("show", screen_resized_grayscaled)
-        # cv2.waitKey(0)start_time = time.time()
+        # cv2.waitKey(0)
 
         # print screen_resized_grayscaled
         # set the pixels to all be 0. or 1.
@@ -454,10 +530,17 @@ class DeepSuna(AI_Player):
             change9 = self.target_weights4.assign(self.weights4)
             # change10 = self.target_weights5.assign(self.weights5)
             change11 = self.target_weights6.assign(self.weights6)
+            change12 = self.target_beta1.assign(self.beta1)
+            change13 = self.target_beta2.assign(self.beta2)
+            change14 = self.target_beta3.assign(self.beta3)
+            change15 = self.target_gamma1.assign(self.gamma1)
+            change16 = self.target_gamma2.assign(self.gamma2)
+            change17 = self.target_gamma3.assign(self.gamma3)
 
             self._session.run(
                 fetches=[change1, change2, change3, change4, change5,
-                         change6, change7, change9, change11])
+                         change6, change7, change9, change11, change12,
+                         change13, change14, change15, change16, change17])
 
         return self._key_presses_from_action(self._last_action)
 
@@ -473,6 +556,9 @@ class DeepSuna(AI_Player):
             # self._input_states = self._last_state
             self.readout_t = \
                 self._session.run(self.output_layer, feed_dict={self._input_states: [self._last_state]})[0]
+            # tf.scalar_summary("Q values", self.readout_t)
+            # if self.verbose_logging:
+            # print("Action Q-Values are %s" % self.readout_t)
 
             action_index = np.argmax(self.readout_t)
 
