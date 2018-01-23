@@ -285,7 +285,7 @@ class DeepSuna(AI_Player):
         self.saver = tf.train.Saver()
         # self.saver.restore(self._session, "networks_middle_presentation/model7300000")
 
-        self.file_folder = "networks_v11_kajima_double_170924"
+        self.file_folder = "networks_v10_kajima_double_171019"
         self.saver.restore(self._session, self.file_folder + "/model"
                            + str(self.restore_filename))
 

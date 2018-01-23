@@ -28,8 +28,8 @@ def _activation_summary(x):
     tf.summary.scalar(tensor_name + '/sparsity', tf.nn.zero_fraction(x))
 
 
-def _variable_on_cpu(name, shape, initializer):
-    """Helper to create a Variable stored on CPU memory.
+def _variable_on_gpu(name, shape, initializer):
+    """Helper to create a Variable stored on GPU memory.
 
   Args:
     name: name of the variable
@@ -39,7 +39,7 @@ def _variable_on_cpu(name, shape, initializer):
   Returns:
     Variable Tensor
   """
-    with tf.device('/cpu:0'):
+    with tf.device('/gpu:0'):
         var = tf.get_variable(name, shape, initializer=initializer)
     return var
 
@@ -60,7 +60,7 @@ def _variable_with_weight_decay(name, shape, stddev, wd):
   Returns:
     Variable Tensor
   """
-    var = _variable_on_cpu(
+    var = _variable_on_gpu(
         name,
         shape,
         tf.truncated_normal_initializer(stddev=stddev))
@@ -104,14 +104,14 @@ class DeepSuna(AI_Player):
     TARGET_NETWORK_UPDATE_FREQ = 10000  # target update frequency
     MINI_BATCH_SIZE = 150  # size of mini batches
     STATE_FRAMES = 4  # number of frames to store in the state
-    RESIZED_SCREEN_X, RESIZED_SCREEN_Y = (40, 40)
+    RESIZED_SCREEN_X, RESIZED_SCREEN_Y = (60, 60)
     OBS_LAST_STATE_INDEX, OBS_ACTION_INDEX, OBS_REWARD_INDEX, OBS_CURRENT_STATE_INDEX, OBS_TERMINAL_INDEX = range(5)
     SAVE_EVERY_X_STEPS = 100000
     LEARN_RATE = 1e-5
     STORE_SCORES_LEN = 200.
     START_TIME = 0
 
-    def __init__(self, checkpoint_path="deep_suna_networks", playback_mode=False, verbose_logging=False):
+    def __init__(self, checkpoint_path="deep_suna_networks", playback_mode=True, verbose_logging=False):
         """
         Example of deep q network for pong
 
@@ -159,59 +159,43 @@ class DeepSuna(AI_Player):
                                                        shape=[8, 8, self.STATE_FRAMES, 32],
                                                        stddev=0.01,
                                                        wd=None)
-            self.biases1 = _variable_on_cpu('biases', [32], tf.constant_initializer(0.01))
-            conv = tf.nn.conv2d(self._input_states, self.kernel1, [1, 2, 2, 1], padding='SAME')
+            self.biases1 = _variable_on_gpu('biases', [32], tf.constant_initializer(0.01))
+            conv = tf.nn.conv2d(self._input_states, self.kernel1, [1, 2, 2, 1], padding='VALID')
             pre_activation = tf.nn.bias_add(conv, self.biases1)
             batch_norm = _batch_normalization(pre_activation)
             conv1 = tf.nn.relu(batch_norm)
-            # _activation_summary(conv1)
-
-            # pool1
-        pool1 = tf.nn.max_pool(conv1, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1],
-                               padding='SAME', name='pool1')
-        # norm1
-        # norm1 = tf.nn.lrn(pool1, 4, bias=1.0, alpha=0.001 / 9.0, beta=0.75,
-        #                   name='norm1')
 
         with tf.variable_scope('conv2'):
             self.kernel2 = _variable_with_weight_decay('weights',
                                                        shape=[4, 4, 32, 64],
                                                        stddev=0.01,
                                                        wd=0.0)
-            self.biases2 = _variable_on_cpu('biases', [64], tf.constant_initializer(0.01))
+            self.biases2 = _variable_on_gpu('biases', [64], tf.constant_initializer(0.01))
             # conv2
-            conv = tf.nn.conv2d(pool1, self.kernel2, [1, 2, 2, 1], padding='SAME')
+            conv = tf.nn.conv2d(conv1, self.kernel2, [1, 2, 2, 1], padding='VALID')
             pre_activation = tf.nn.bias_add(conv, self.biases2)
             batch_norm = _batch_normalization(pre_activation)
             conv2 = tf.nn.relu(batch_norm)
-            # _activation_summary(conv2)
-
-        pool2 = tf.nn.max_pool(conv2, ksize=[1, 2, 2, 1],
-                               strides=[1, 2, 2, 1], padding='SAME', name='pool2')
 
         with tf.variable_scope('conv3'):
             self.kernel3 = _variable_with_weight_decay('weights',
                                                        shape=[3, 3, 64, 64],
                                                        stddev=0.01,
                                                        wd=0.0)
-            self.biases3 = _variable_on_cpu('biases', [64], tf.constant_initializer(0.01))
+            self.biases3 = _variable_on_gpu('biases', [64], tf.constant_initializer(0.01))
             # conv3
-            conv = tf.nn.conv2d(pool2, self.kernel3, [1, 1, 1, 1], padding='SAME')
+            conv = tf.nn.conv2d(conv2, self.kernel3, [1, 1, 1, 1], padding='VALID')
             pre_activation = tf.nn.bias_add(conv, self.biases3)
             batch_norm = _batch_normalization(pre_activation)
             conv3 = tf.nn.relu(batch_norm)
-            # _activation_summary(conv3)
-            # pool3
-        pool3 = tf.nn.max_pool(conv3, ksize=[1, 2, 2, 1],
-                               strides=[1, 2, 2, 1], padding='SAME', name='pool2')
 
         with tf.variable_scope('local3'):
-            self.weights4 = _variable_with_weight_decay('weights', shape=[256, 256],
+            self.weights4 = _variable_with_weight_decay('weights', shape=[6400, 256],
                                                         stddev=0.01, wd=0.0)
-            self.biases4 = _variable_on_cpu('biases', [256], tf.constant_initializer(0.01))
+            self.biases4 = _variable_on_gpu('biases', [256], tf.constant_initializer(0.01))
             # local3
             # Move everything into depth so we can perform a single matrix multiply.
-            reshape = tf.reshape(pool3, [-1, 256])
+            reshape = tf.reshape(conv3, [-1, 6400])
             # dim = reshape.get_shape()[1].value
             local3 = tf.nn.relu(tf.matmul(reshape, self.weights4) + self.biases4)
             # _activation_summary(local3)
@@ -220,79 +204,9 @@ class DeepSuna(AI_Player):
         with tf.variable_scope('softmax_linear'):
             self.weights6 = _variable_with_weight_decay('weights', [256, self.ACTIONS_COUNT],
                                                         stddev=0.01, wd=0.0)
-            self.biases6 = _variable_on_cpu('biases', [self.ACTIONS_COUNT],
+            self.biases6 = _variable_on_gpu('biases', [self.ACTIONS_COUNT],
                                             tf.constant_initializer(0.01))
             self.output_layer = tf.add(tf.matmul(local3, self.weights6), self.biases6)
-
-        # with tf.device('/gpu:0'):
-        with tf.variable_scope('target_conv1'):
-            self.target_kernel1 = _variable_with_weight_decay('target_weights',
-                                                              shape=[8, 8, self.STATE_FRAMES, 32],
-                                                              stddev=0.01,
-                                                              wd=0.0)
-            self.target_biases1 = _variable_on_cpu('target_biases', [32], tf.constant_initializer(0.01))
-            target_conv = tf.nn.conv2d(self._target_input_states, self.target_kernel1, [1, 2, 2, 1],
-                                       padding='SAME')
-            target_pre_activation = target_conv + self.target_biases1
-            target_conv1 = tf.nn.relu(target_pre_activation)
-            # _activation_summary(target_conv1)
-
-        target_pool1 = tf.nn.max_pool(target_conv1, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1],
-                                      padding='SAME', name='target_pool1')
-
-        with tf.variable_scope('target_conv2'):
-            self.target_kernel2 = _variable_with_weight_decay('target_weights',
-                                                              shape=[4, 4, 32, 64],
-                                                              stddev=0.01,
-                                                              wd=0.0)
-            self.target_biases2 = _variable_on_cpu('target_biases', [64], tf.constant_initializer(0.01))
-            # conv2
-            target_conv = tf.nn.conv2d(target_pool1, self.target_kernel2, [1, 2, 2, 1], padding='SAME')
-            target_pre_activation = target_conv + self.target_biases2
-            target_conv2 = tf.nn.relu(target_pre_activation)
-            # _activation_summary(target_conv2)
-
-        target_pool2 = tf.nn.max_pool(target_conv2, ksize=[1, 2, 2, 1],
-                                      strides=[1, 2, 2, 1], padding='SAME', name='target_pool2')
-
-        with tf.variable_scope('target_conv3'):
-            self.target_kernel3 = _variable_with_weight_decay('target_weights',
-                                                              shape=[3, 3, 64, 64],
-                                                              stddev=0.01,
-                                                              wd=0.0)
-            self.target_biases3 = _variable_on_cpu('target_biases', [64], tf.constant_initializer(0.01))
-            # conv3
-            target_conv = tf.nn.conv2d(target_pool2, self.target_kernel3, [1, 1, 1, 1], padding='SAME')
-            target_pre_activation = target_conv + self.target_biases3
-            target_conv3 = tf.nn.relu(target_pre_activation)
-            # _activation_summary(target_conv3)
-
-        target_pool3 = tf.nn.max_pool(target_conv3, ksize=[1, 2, 2, 1],
-                                      strides=[1, 2, 2, 1], padding='SAME', name='target_pool2')
-
-        with tf.variable_scope('target_local3'):
-            self.target_weights4 = _variable_with_weight_decay('target_weights',
-                                                               shape=[256, 256],
-                                                               stddev=0.01, wd=0.0)
-            self.target_biases4 = _variable_on_cpu('target_biases', [256], tf.constant_initializer(0.01))
-            # local3
-            # Move everything into depth so we can perform a single matrix multiply.
-            reshape = tf.reshape(target_pool3, [-1, 256])
-            # dim = reshape.get_shape()[1].value
-
-            target_local3 = tf.nn.relu(tf.matmul(reshape, self.target_weights4) + self.target_biases4)
-            # _activation_summary(target_local3)
-            # target_fiction_dropout = tf.nn.dropout(target_local3, keep_prob=0.5)
-
-        with tf.variable_scope('target_softmax_linear'):
-            self.target_weights6 = _variable_with_weight_decay('target_weights',
-                                                               [256, self.ACTIONS_COUNT],
-                                                               stddev=0.01, wd=0.0)
-            self.target_biases6 = _variable_on_cpu('target_biases', [self.ACTIONS_COUNT],
-                                                   tf.constant_initializer(0.01))
-
-            self.target_output_layer = tf.add(tf.matmul(target_local3, self.target_weights6),
-                                              self.target_biases6)
 
         self._observations = deque()
         self._last_scores = deque()
@@ -301,7 +215,7 @@ class DeepSuna(AI_Player):
 
         self.duration = 0
         self.count = 1
-        self.restore_filename = 100000
+        self.restore_filename = 5500000
 
         self.saver = tf.train.Saver()
         # self.saver.restore(self._session, "networks_middle_presentation/model7300000")
@@ -309,16 +223,6 @@ class DeepSuna(AI_Player):
         self.file_folder = "deep_suna_networks"
         self.saver.restore(self._session, self.file_folder + "/model"
                            + str(self.restore_filename))
-
-        '''
-        checkpoint = tf.train.get_checkpoint_state(self._checkpoint_path)
-
-        if checkpoint and checkpoint.model_checkpoint_path:
-            self._saver.restore(self._session, checkpoint.model_checkpoint_path)
-            print("Loaded checkpoints %s" % checkpoint.model_checkpoint_path)
-        elif playback_mode:
-            raise Exception("Could not load checkpoints for playback")
-        '''
 
     def get_keys_pressed(self, screen_array, reward, terminal, turn):
         # scale down screen image
@@ -341,11 +245,6 @@ class DeepSuna(AI_Player):
             print "model" + str(self.restore_filename)
             self.count += 1
             # player.start()
-
-        if reward != 0.0:
-            self._last_scores.append(reward)
-            if len(self._last_scores) > self.STORE_SCORES_LEN:
-                self._last_scores.popleft()
 
         # first frame must be handled differently
         if self._last_state is None:
@@ -375,29 +274,6 @@ class DeepSuna(AI_Player):
 
         new_action[action_index] = 1
         return new_action
-
-    '''
-    def _choose_next_action(self):
-        new_action = np.zeros([self.ACTIONS_COUNT])
-
-        if (not self._playback_mode) and (random.random() <= self._probability_of_random_action):
-            # choose an action randomly
-            action_index = random.randrange(self.ACTIONS_COUNT)
-        else:
-            # choose an action given our last state
-
-            # self._input_states = self._last_state
-            self.readout_t = \
-                self._session.run(self.output_layer[0], feed_dict={self._input_states[0]: [self._last_state]})[0]
-            # tf.scalar_summary("Q values", self.readout_t)
-            # if self.verbose_logging:
-            # print("Action Q-Values are %s" % self.readout_t)
-
-            action_index = np.argmax(self.readout_t)
-
-        new_action[action_index] = 1
-        return new_action
-    '''
 
     @staticmethod
     def _key_presses_from_action(action_set):
