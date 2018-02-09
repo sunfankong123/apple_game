@@ -371,7 +371,7 @@ class DeepSuna:
 
         screen_array = self.env.getScreenRGB()
         screen_resized_grayscaled = cv2.cvtColor(cv2.resize(screen_array,
-                                                            (self.RESIZED_SCREEN_X, self.RESIZED_SCREEN_Y)),
+                                                            (self.RESIZED_SCREEN_Y, self.RESIZED_SCREEN_X)),
                                                  cv2.COLOR_BGR2GRAY)
         # screen_resized_grayscaled *= 1/255
 
